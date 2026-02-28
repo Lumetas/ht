@@ -182,7 +182,7 @@ Content-Type: application/json
     "password": "secret"
 }
 
-> {%
+<?php
 // Access response
 $api->set('token', $response->json_body()['token']);
 $output->write('Login successful!');
@@ -192,7 +192,7 @@ var_dump($var);
 print_r($var);
 json_decode($json);
 json_encode($data);
-%}
+?>
 ```
 
 ### Pre-Script (before request)
@@ -201,18 +201,18 @@ json_encode($data);
 ### #modifyRequest
 GET https://api.example.com/data
 
-> {%
---pre
+<?php
+#pre
 // Modify request before sending
 $request->method = 'POST';
 $request->url = 'https://api.example.com/create';
 $request->headers['X-Custom'] = 'value';
 $request->body = '{"modified": true}';
 $api->set('some_var', 'value');
---post
+#post
 // This runs after response
 $output->append('Request completed');
-%}
+?>
 ```
 
 ### Script API
@@ -260,10 +260,10 @@ $output->append('Request completed');
 ### #first
 GET https://api.example.com/step1
 
-> {%
+<?php
 $api->set('id', $response->json_body()['id']);
 $api->send('second');
-%}
+?>
 
 ### #second
 GET https://api.example.com/step2/{{id}}
@@ -307,9 +307,9 @@ Content-Type: application/json
     "password": "secret"
 }
 
-> {%
+<?php
 $api->set('token', $response->json_body()['token']);
-%}
+?>
 
 ### #getData
 GET https://{{host}}/data
@@ -322,18 +322,18 @@ Authorization: Bearer {{token}}
 ### #custom
 GET https://api.example.com/data
 
-> {%
+<?php
 // Replace response with custom output
 $output->write('Request completed successfully!');
-%}
+?>
 
 ### #append
 GET https://api.example.com/data
 
-> {%
+<?php
 // Add info after response
 $output->append('Cached: yes');
-%}
+?>
 ```
 
 ## Testing

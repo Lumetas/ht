@@ -259,7 +259,7 @@ class SwaggerGenerator
         $statusArray = var_export($statusMessages, true);
         
         $script = <<<PHP
-> {%
+<?php
 \$statusMessages = {$statusArray};
 
 if (isset(\$statusMessages[\$response->status_code])) {
@@ -269,7 +269,7 @@ if (isset(\$statusMessages[\$response->status_code])) {
 } elseif (\$response->status_code >= 400) {
     \$output->append('Client error: ' . \$response->status_code);
 }
-%}
+?>
 PHP;
 
         return $script;
