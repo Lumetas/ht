@@ -4,10 +4,12 @@
     "type": "library",
     "license": "MIT",
     "bin": [
-        "bin/ht"
+        "bin/ht",
+        "bin/ht-swagger"
     ],
     "require": {
-        "php": ">=8.0"
+        "php": ">=8.0",
+        "symfony/yaml": "^8.0"
     },
     "autoload": {
         "psr-4": {

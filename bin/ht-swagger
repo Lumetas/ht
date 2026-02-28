@@ -1,0 +1,32 @@
+#!/usr/bin/env php
+<?php
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use Lum\Ht\SwaggerGenerator;
+
+if (count($argv) < 3) {
+    echo "Usage: ht-swagger <openapi.yml> <output.ht>\n";
+    echo "\n";
+    echo "Generate .ht file from OpenAPI/Swagger specification\n";
+    exit(1);
+}
+
+$inputFile = $argv[1];
+$outputFile = $argv[2];
+
+try {
+    $generator = new SwaggerGenerator();
+    $generator->load($inputFile);
+    
+    $content = $generator->generate();
+    
+    file_put_contents($outputFile, $content);
+    
+    $vars = $generator->getVariables();
+    echo "Generated {$outputFile} with " . count($vars) . " variables and requests\n";
+    
+} catch (\RuntimeException $e) {
+    fwrite(STDERR, "[ERROR] {$e->getMessage()}\n");
+    exit(1);
+}
