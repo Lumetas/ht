@@ -353,4 +353,3 @@ Run tests:
 ## Requirements
 
 - PHP 8.1+
-- No external dependencies (uses PHP streams)

@@ -9,6 +9,7 @@ class SwaggerGenerator
     private array $spec = [];
     private string $baseUrl = '';
     private array $variables = [];
+    private array $examples = [];
     private array $requests = [];
 
     public function load(string $file): void
@@ -92,6 +93,8 @@ class SwaggerGenerator
     {
         $this->variables = [];
 
+        $this->variables['baseUrl'] = $this->baseUrl;
+
         if (!empty($this->spec['variables'])) {
             foreach ($this->spec['variables'] as $name => $var) {
                 $default = $var['default'] ?? '';
@@ -126,13 +129,17 @@ class SwaggerGenerator
             $varName = $this->makeVariableName($path, $method, $name, $in);
 
             if (!isset($this->variables[$varName])) {
-                $default = $param['example'] ?? $param['default'] ?? '';
+                $example = $param['example'] ?? $param['default'] ?? '';
                 
-                if ($in === 'path' && empty($default)) {
-                    $default = $name;
+                if ($in === 'path' && empty($example)) {
+                    $example = $name;
                 }
                 
-                $this->variables[$varName] = $default;
+                $this->variables[$varName] = $example;
+                
+                if (!empty($example)) {
+                    $this->examples[$varName] = $example;
+                }
             }
         }
     }
@@ -170,12 +177,19 @@ class SwaggerGenerator
         $operationId = $details['operationId'] ?? strtolower($method) . '_' . trim($path, '/');
         $operationId = preg_replace('/[^a-zA-Z0-9_]/', '_', $operationId);
         
-        $url = $this->baseUrl . $path;
+        $url = '{{baseUrl}}' . $path;
         
         $headers = [];
         $queryParams = [];
         $pathParams = [];
         $body = null;
+
+        $security = $details['security'] ?? $this->spec['security'] ?? [];
+        if (!empty($security)) {
+            $this->variables['token'] = $this->variables['token'] ?? '';
+            $this->examples['token'] = $this->examples['token'] ?? '';
+            $headers['Authorization'] = '{{token}}';
+        }
 
         $parameters = $this->resolveParameters($details['parameters'] ?? []);
 
@@ -344,7 +358,15 @@ PHP;
         $lines[] = '';
 
         foreach ($this->variables as $name => $default) {
-            $lines[] = "@{$name} = {{\${$name}}}";
+            if ($name === 'baseUrl') {
+                $lines[] = "@{$name} = {$default}";
+            } elseif ($name === 'token') {
+                $lines[] = "@{$name} = {{\${$name}}}";
+            } elseif (isset($this->examples[$name])) {
+                // skip - example used directly in request
+            } else {
+                $lines[] = "@{$name} = {{\${$name}}}";
+            }
         }
 
         $lines[] = '';
@@ -366,7 +388,11 @@ PHP;
             }
 
             foreach ($request['query'] as $name => $varName) {
-                $lines[] = "{$name}={{{$varName}}}";
+                if (isset($this->examples[$varName])) {
+                    $lines[] = "{$name}={$this->examples[$varName]}";
+                } else {
+                    $lines[] = "{$name}={{{$varName}}}";
+                }
             }
 
             if ($request['body']) {
