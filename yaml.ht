@@ -1,0 +1,79 @@
+# Generated from OpenAPI spec
+
+@get_pets_query_limit = {{$get_pets_query_limit}}
+@get_pets_query_page = {{$get_pets_query_page}}
+@get_pets_query_status = {{$get_pets_query_status}}
+@get_pets_petId_path_petId = {{$get_pets_petId_path_petId}}
+@put_pets_petId_path_petId = {{$put_pets_petId_path_petId}}
+@delete_pets_petId_path_petId = {{$delete_pets_petId_path_petId}}
+@post_pets_petId_upload_path_petId = {{$post_pets_petId_upload_path_petId}}
+@get_pets_filter_query_filters = {{$get_pets_filter_query_filters}}
+
+### #main
+GET {{baseUrl}}/
+
+### #login
+# Вход в систему
+POST https://api.petstore.com/v1/auth/login
+Content-Type: application/json
+
+{
+    "email": "admin@petstore.com",
+    "password": "secret123"
+}
+
+### #me
+# Информация о текущем пользователе
+GET https://api.petstore.com/v1/auth/me
+
+### #listPets
+# Список питомцев
+GET https://api.petstore.com/v1/pets
+limit={{get_pets_query_limit}}
+page={{get_pets_query_page}}
+status={{get_pets_query_status}}
+
+### #createPet
+# Создать питомца
+POST https://api.petstore.com/v1/pets
+Content-Type: application/json
+
+{
+    "id": 1,
+    "name": "\u0411\u0430\u0440\u0441\u0438\u043a",
+    "category": {},
+    "tags": [],
+    "status": "available",
+    "age": 3
+}
+
+### #getPet
+# Получить питомца
+GET https://api.petstore.com/v1/pets/{{get_pets_petId_path_petId}}
+
+### #updatePet
+# Обновить питомца
+PUT https://api.petstore.com/v1/pets/{{put_pets_petId_path_petId}}
+Content-Type: application/json
+
+{
+    "id": 1,
+    "name": "\u0411\u0430\u0440\u0441\u0438\u043a",
+    "category": {},
+    "tags": [],
+    "status": "available",
+    "age": 3
+}
+
+### #deletePet
+# Удалить питомца
+DELETE https://api.petstore.com/v1/pets/{{delete_pets_petId_path_petId}}
+
+### #uploadPetPhoto
+# Загрузить фото
+POST https://api.petstore.com/v1/pets/{{post_pets_petId_upload_path_petId}}/upload
+
+### #filterPets
+# Сложный поиск с фильтрами
+GET https://api.petstore.com/v1/pets/filter
+filters={{get_pets_filter_query_filters}}

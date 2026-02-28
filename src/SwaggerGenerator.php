@@ -51,6 +51,43 @@ class SwaggerGenerator
         }
     }
 
+    private function resolveRef(string $ref): ?array
+    {
+        if (!str_starts_with($ref, '#/')) {
+            return null;
+        }
+
+        $parts = explode('/', substr($ref, 2));
+        $current = $this->spec;
+
+        foreach ($parts as $part) {
+            if (!isset($current[$part])) {
+                return null;
+            }
+            $current = $current[$part];
+        }
+
+        return is_array($current) ? $current : null;
+    }
+
+    private function resolveParameters(array $parameters): array
+    {
+        $resolved = [];
+        
+        foreach ($parameters as $param) {
+            if (isset($param['$ref'])) {
+                $resolvedParam = $this->resolveRef($param['$ref']);
+                if ($resolvedParam) {
+                    $resolved[] = $resolvedParam;
+                }
+            } else {
+                $resolved[] = $param;
+            }
+        }
+
+        return $resolved;
+    }
+
     private function extractVariables(): void
     {
         $this->variables = [];
@@ -70,7 +107,8 @@ class SwaggerGenerator
                     continue;
                 }
 
-                $this->extractParameters($details['parameters'] ?? [], $path, $method);
+                $parameters = $this->resolveParameters($details['parameters'] ?? []);
+                $this->extractParameters($parameters, $path, $method);
             }
         }
     }
@@ -78,13 +116,17 @@ class SwaggerGenerator
     private function extractParameters(array $parameters, string $path, string $method): void
     {
         foreach ($parameters as $param) {
+            if (!isset($param['name']) || !isset($param['in'])) {
+                continue;
+            }
+
             $name = $param['name'];
             $in = $param['in'];
             
             $varName = $this->makeVariableName($path, $method, $name, $in);
 
             if (!isset($this->variables[$varName])) {
-                $default = $param['default'] ?? '';
+                $default = $param['example'] ?? $param['default'] ?? '';
                 
                 if ($in === 'path' && empty($default)) {
                     $default = $name;
@@ -135,12 +177,15 @@ class SwaggerGenerator
         $pathParams = [];
         $body = null;
 
-        $parameters = $details['parameters'] ?? [];
+        $parameters = $this->resolveParameters($details['parameters'] ?? []);
 
         foreach ($parameters as $param) {
+            if (!isset($param['name']) || !isset($param['in'])) {
+                continue;
+            }
+
             $name = $param['name'];
             $in = $param['in'];
-            $required = $param['required'] ?? false;
             
             $varName = $this->makeVariableName($path, $method, $name, $in);
             
@@ -186,34 +231,66 @@ class SwaggerGenerator
 
     private function generateJsonBody(array $schema): string
     {
-        if (isset($schema['type']) && $schema['type'] === 'object' && isset($schema['properties'])) {
-            $example = [];
-            foreach ($schema['properties'] as $name => $prop) {
-                $example[$name] = $this->generatePropertyExample($prop);
-            }
-            return json_encode($example, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-        }
-        
         if (isset($schema['$ref'])) {
-            $ref = $schema['$ref'];
-            $parts = explode('/', $ref);
+            $resolved = $this->resolveRef($schema['$ref']);
+            if ($resolved) {
+                return $this->generateJsonBody($resolved);
+            }
+            $parts = explode('/', $schema['$ref']);
             $name = end($parts);
             return '{"$ref": "' . $name . '"}';
         }
 
+        if (isset($schema['type']) && $schema['type'] === 'object') {
+            if (isset($schema['properties'])) {
+                $example = [];
+                foreach ($schema['properties'] as $propName => $prop) {
+                    $example[$propName] = $this->generatePropertyExample($prop);
+                }
+                return json_encode($example, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            }
+            
+            if (isset($schema['allOf'])) {
+                $example = [];
+                foreach ($schema['allOf'] as $item) {
+                    $itemExample = $this->generateJsonBody($item);
+                    $decoded = json_decode($itemExample, true);
+                    if (is_array($decoded)) {
+                        $example = array_merge($example, $decoded);
+                    }
+                }
+                return json_encode($example, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+            }
+        }
+
+        if (isset($schema['type']) && $schema['type'] === 'array') {
+            $items = $schema['items'] ?? [];
+            $itemExample = $this->generatePropertyExample($items);
+            return json_encode([$itemExample], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        }
+        
         return '{}';
     }
 
     private function generatePropertyExample(array $prop): mixed
     {
+        if (isset($prop['$ref'])) {
+            $resolved = $this->resolveRef($prop['$ref']);
+            if ($resolved) {
+                return $this->generatePropertyExample($resolved);
+            }
+            $parts = explode('/', $prop['$ref']);
+            return end($parts);
+        }
+
         $type = $prop['type'] ?? 'string';
         
         return match ($type) {
-            'string' => $prop['example'] ?? 'string',
-            'integer' => $prop['example'] ?? 0,
-            'number' => $prop['example'] ?? 0.0,
-            'boolean' => $prop['example'] ?? true,
-            'array' => [],
+            'string' => $prop['example'] ?? $prop['default'] ?? 'string',
+            'integer' => $prop['example'] ?? $prop['default'] ?? 0,
+            'number' => $prop['example'] ?? $prop['default'] ?? 0.0,
+            'boolean' => $prop['example'] ?? $prop['default'] ?? true,
+            'array' => $prop['example'] ?? [],
             'object' => $prop['example'] ?? (object)[],
             default => 'value',
         };
