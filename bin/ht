@@ -1,735 +1,783 @@
 #!/usr/bin/env php
 <?php
 
-class HttpTool {
-    private string $file;
-    private ?string $requestName;
-    private bool $showAll = false;
-    private bool $suppressResponse = false;
-    private array $lines = [];
-    private array $globalVariables = [];
-    private array $localVariables = [];
-    private array $parsedRequest = [];
-    private array $scriptContext = [];
-    
-    public function getGlobalVariable(string $key): ?string {
-        return $this->globalVariables[$key] ?? null;
-    }
-    
-    public function setGlobalVariable(string $key, string $value): void {
-        $this->globalVariables[$key] = $value;
-    }
-    
-    public function suppressResponse(bool $value = true): void {
-        $this->suppressResponse = $value;
-    }
-    
-    public function __construct(string $file, ?string $requestName = null, bool $showAll = false) {
-        $this->file = $file;
-        $this->requestName = $requestName;
-        $this->showAll = $showAll;
-    }
-    
-    public function run(): void {
-        if (!file_exists($this->file)) {
-            $this->error("File not found: {$this->file}");
-        }
-        
-        $this->lines = file($this->file, FILE_IGNORE_NEW_LINES);
-        
-        if ($this->requestName === null) {
-            $this->requestName = 'main';
-        }
-        
-        $this->parseAndExecute();
-    }
-    
-    private function parseAndExecute(): void {
-        $this->parsedRequest = []; // Reset for chained requests
-        $this->suppressResponse = false; // Reset for chained requests
-        
-        $area = $this->findRequestArea($this->requestName);
-        
-        if ($area === null) {
-            $this->error("Request '#{$this->requestName}' not found in {$this->file}");
-        }
-        
-        [$start, $end] = $area;
-        
-        $this->parseGlobalVariables($start);
-        
-        $this->parseRequest($start, $end);
-        
-        if (empty($this->parsedRequest['url'])) {
-            $this->error("No URL found for request '#{$this->requestName}'");
-        }
-        
-        $this->executeRequest();
-    }
-    
-    private function findRequestArea(string $name): ?array {
-        $inArea = false;
-        $areaStart = null;
-        $areaEnd = null;
-        $requestNameFromLine = '';
-        
-        foreach ($this->lines as $i => $line) {
-            $trimmed = trim($line);
-            
-            if (preg_match('/^###\s*#(.+)$/', $trimmed, $matches)) {
-                $requestNameFromLine = trim($matches[1]);
-                if ($requestNameFromLine === $name) {
-                    $inArea = true;
-                    $areaStart = $i + 1;
-                    continue;
-                } else {
-                    if ($inArea) {
-                        $areaEnd = $i - 1;
-                    }
-                    $inArea = false;
-                }
-            }
-            
-            if (trim($line) === '###') {
-                if ($inArea) {
-                    $areaEnd = $i - 1;
-                    break;
-                }
-                continue;
-            }
-            
-            if ($inArea && $areaStart === null) {
-                $areaStart = $i;
-            }
-        }
-        
-        if ($areaStart !== null && $areaEnd === null) {
-            $areaEnd = count($this->lines) - 1;
-        }
-        
-        if ($areaStart !== null) {
-            return [$areaStart, $areaEnd];
-        }
-        
-        return null;
-    }
-    
-    private function parseGlobalVariables(int $maxLine): void {
-        for ($i = 0; $i < $maxLine; $i++) {
-            $line = trim($this->lines[$i]);
-            
-            if ($line === '' || $line === '###' || $line[0] === '#') {
-                continue;
-            }
-            
-            if ($line[0] === '@') {
-                $this->parseVariable($line, true);
-            }
-        }
-    }
-    
-    private function parseVariable(string $line, bool $isGlobal = false): void {
-        if (preg_match('/^@([a-zA-Z_][\w\-_\.]*)\s*=\s*(.+)$/', $line, $matches)) {
-            $key = $matches[1];
-            $fullValue = $matches[2];
-            
-            // Remove inline comment
-            $value = preg_replace('/\s*#.*$/', '', $fullValue);
-            $value = trim($value);
-            
-            $value = $this->replaceVariables($value);
-            
-            if (str_starts_with($key, 'cfg.')) {
-                $configKey = substr($key, 4);
-                $this->parsedRequest[$configKey] = $this->parseConfigValue($configKey, $value);
-            } else {
-                if ($isGlobal) {
-                    $this->globalVariables[$key] = $value;
-                } else {
-                    $this->localVariables[$key] = $value;
-                }
-            }
-        }
-    }
-    
-    private function parseConfigValue(string $key, string $value): mixed {
-        return match ($key) {
-            'insecure' => $value === 'true',
-            'dry_run' => $value === 'true',
-            'timeout' => (int) $value,
-            'proxy' => $value,
-            'raw' => array_map('trim', explode(',', $value)),
-            'check_json_body' => $value === 'true',
-            default => $value,
-        };
-    }
-    
-    private function parseRequest(int $start, int $end): void {
-        $parsingState = 'variables';
-        $bodyLines = [];
-        $scriptLines = [];
-        $inScript = false;
-        $inBody = false;
-        
-        for ($i = $start; $i <= $end; $i++) {
-            $line = $this->lines[$i];
-            $trimmed = trim($line);
-            
-            if ($trimmed === '' || $trimmed[0] === '#') {
-                continue;
-            }
-            
-            if ($parsingState === 'variables') {
-                if (isset($trimmed[0]) && $trimmed[0] === '@') {
-                    $this->parseVariable($trimmed, false);
-                    continue;
-                }
-            }
-            
-            if ($parsingState === 'variables') {
-                $parsingState = 'request';
-            }
-            
-            if ($parsingState === 'request') {
-                if (preg_match('/^([A-Z]+)\s+(https?:\/\/[^\s#]+)/i', $trimmed, $matches)) {
-                    $this->parsedRequest['method'] = strtoupper($matches[1]);
-                    $url = $matches[2];
-                    if (preg_match('/HTTP\/[\d.]+$/', $trimmed, $httpMatch)) {
-                        $url = str_replace($httpMatch[0], '', $url);
-                    }
-                    $this->parsedRequest['url'] = $this->replaceVariables(trim($url));
-                    $parsingState = 'headers';
-                    continue;
-                }
-            }
-            
-            if ($parsingState === 'headers' || $parsingState === 'query') {
-                // Stop at next request
-                if ($trimmed !== '' && str_starts_with($trimmed, '###')) {
-                    break;
-                }
-                
-                if ($trimmed === '--{%' || $trimmed === '> {%' || preg_match('/^>%s*\{%$/', $trimmed)) {
-                    $inScript = true;
-                    $parsingState = 'script';
-                    $scriptLines[] = $line;
-                    continue;
-                }
-                
-                if (preg_match('/^([^=:\s]+)\s*[:=]\s*(.*)$/', $trimmed, $matches)) {
-                    $key = trim($matches[1]);
-                    $value = $this->replaceVariables(trim($matches[2]));
-                    
-                    if (str_starts_with($key, '@')) {
-                        continue;
-                    }
-                    
-                    if (str_contains($trimmed, ':')) {
-                        $this->parsedRequest['headers'][$key] = $value;
-                    } else {
-                        $this->parsedRequest['query'][$key] = $value;
-                    }
-                    continue;
-                }
-                
-                // Not a header/query - it's body
-                $parsingState = 'body';
-            }
-            
-            if ($parsingState === 'body') {
-                if ($trimmed !== '' && str_starts_with($trimmed, '###')) {
-                    break;
-                }
-                if ($trimmed === '--{%' || $trimmed === '> {%') {
-                    break;
-                }
-                if (!empty($trimmed) || !empty($bodyLines)) {
-                    $bodyLines[] = $line;
-                }
-                continue;
-            }
-            
-            if ($parsingState === 'script' || $inScript) {
-                if ($trimmed === '--pre' || $trimmed === '--post') {
-                    // marker
-                }
-                
-                if (preg_match('/^%\}$/', $trimmed) || preg_match('/^--%\}$/', $trimmed)) {
-                    $inScript = false;
-                    $scriptLines[] = $line;
-                    
-                    $scriptContent = implode("\n", array_slice($scriptLines, 1, -1));
-                    
-                    if (preg_match('/^--pre\s*$.*?^--post\s*$/ms', $scriptContent)) {
-                        preg_match('/^--pre\s*\n(.*)^--post\s*\n(.*)$/ms', $scriptContent, $matches);
-                        $this->parsedRequest['pre_script'] = trim($matches[1] ?? '');
-                        $this->parsedRequest['script'] = trim($matches[2] ?? '');
-                    } else {
-                        $this->parsedRequest['script'] = $scriptContent;
-                    }
-                    continue;
-                }
-                $scriptLines[] = $line;
-            }
-        }
-        
-        if (!empty($bodyLines)) {
-            $this->parsedRequest['body'] = implode("\n", $bodyLines);
-        }
-    }
-    
-    private function replaceVariables(string $text): string {
-        return preg_replace_callback('/\{\{(.*?)\}\}/', function($matches) {
-            $key = trim($matches[1]);
-            
-            if ($key === '') {
-                $this->error("Empty variable key");
-                return $matches[0];
-            }
-            
-            $firstChar = $key[0];
-            
-            if ($firstChar === '$') {
-                $envKey = strtoupper(substr($key, 1));
-                $value = getenv($envKey);
-                return $value !== false ? $value : '';
-            }
-            
-            if ($firstChar === '>') {
-                $isCached = str_starts_with($key, '>>');
-                $cmd = substr($key, $isCached ? 2 : 1);
-                
-                if ($isCached && isset($this->globalVariables[$key])) {
-                    return $this->globalVariables[$key];
-                }
-                
-                $output = $this->execCommand($cmd);
-                
-                if ($isCached) {
-                    $this->globalVariables[$key] = $output;
-                }
-                
-                return $output;
-            }
-            
-            if (isset($this->localVariables[$key])) {
-                return $this->localVariables[$key];
-            }
-            
-            if (isset($this->globalVariables[$key])) {
-                return $this->globalVariables[$key];
-            }
-            
-            $this->error("Variable '{$key}' not found");
-            return $matches[0];
-        }, $text);
-    }
-    
-    private function execCommand(string $cmd): string {
-        $descriptorSpec = [
-            0 => ['pipe', 'r'],
-            1 => ['pipe', 'w'],
-            2 => ['pipe', 'w']
-        ];
-        
-        $process = proc_open($cmd, $descriptorSpec, $pipes);
-        
-        if (!is_resource($process)) {
-            return "Error: could not execute command";
-        }
-        
-        fclose($pipes[0]);
-        $stdout = stream_get_contents($pipes[1]);
-        fclose($pipes[1]);
-        $stderr = stream_get_contents($pipes[2]);
-        fclose($pipes[2]);
-        
-        proc_close($process);
-        
-        return trim($stdout);
-    }
-    
-    private function runPreScript(string $script, string &$url, string &$method, array &$headers, ?string &$body, array &$query): void {
-        $this->info("Running pre-script...");
-        
-        $requestData = [
-            'url' => $url,
-            'method' => $method,
-            'headers' => $headers,
-            'body' => $body,
-            'query' => $query,
-        ];
-        
-        $apiObj = new class($this) {
-            private HttpTool $tool;
-            
-            public function __construct(HttpTool $tool) {
-                $this->tool = $tool;
-            }
-            
-            public function set(string $key, mixed $value): void {
-                $this->tool->setGlobalVariable($key, (string) $value);
-            }
-            
-            public function get(string $key): ?string {
-                return $this->tool->getGlobalVariable($key);
-            }
-        };
-        
-        $requestObj = new class($requestData) {
-            public string $url;
-            public string $method;
-            public array $headers;
-            public ?string $body;
-            public array $query;
-            
-            public function __construct(array $data) {
-                foreach ($data as $k => $v) {
-                    $this->$k = $v;
-                }
-            }
-        };
-        
-        $this->scriptContext = [
-            'api' => $apiObj,
-            'var_dump' => function(mixed $var): void { var_dump($var); },
-            'print_r' => function(mixed $var): void { print_r($var); },
-            'json_decode' => fn(string $json, bool $assoc = true) => json_decode($json, $assoc),
-            'json_encode' => fn(mixed $data, int $flags = 0) => json_encode($data, $flags),
-        ];
-        
-        // Add request as separate variable (extract doesn't work with objects)
-        $request = $requestObj;
-        
-        extract($this->scriptContext);
-        
-        try {
-            eval($script);
-        } catch (Throwable $e) {
-            $this->error("Pre-script error: {$e->getMessage()}");
-        }
-        
-        // Apply modifications from $request
-        $url = $request->url;
-        $method = $request->method;
-        $headers = array_merge($headers, $request->headers);
-        if ($request->body !== null) $body = $request->body;
-        $query = array_merge($query, $request->query);
-    }
-    
-    private function executeRequest(): void {
-        $url = $this->parsedRequest['url'];
-        $method = $this->parsedRequest['method'] ?? 'GET';
-        $headers = $this->parsedRequest['headers'] ?? [];
-        $body = $this->parsedRequest['body'] ?? null;
-        $query = $this->parsedRequest['query'] ?? [];
-        $timeout = ($this->parsedRequest['timeout'] ?? 30) * 1000;
-        
-        if (!empty($this->parsedRequest['pre_script'])) {
-            $this->runPreScript($this->parsedRequest['pre_script'], $url, $method, $headers, $body, $query);
-        }
-        
-        if (!empty($query)) {
-            $url .= '?' . http_build_query($query);
-        }
-        
-        $this->info("Executing: {$method} {$url}");
-        
-        if (!empty($this->parsedRequest['dry_run'])) {
-            $this->info("Dry run mode - request not sent");
-            $this->printRequest();
-            return;
-        }
-        
-        $result = $this->makeHttpRequest($url, $method, $headers, $body, $timeout);
-        
-        if ($result['error']) {
-            $this->error("Request failed: {$result['error']}");
-        }
-        
-        // If there's a script with write(), suppress the default body output
-        if (!empty($this->parsedRequest['script'])) {
-            $this->runScript($this->parsedRequest['script'], $result);
-        } else {
-            $this->printResponse($result);
-        }
-    }
-    
-    private function makeHttpRequest(
-        string $url,
-        string $method,
-        array $headers,
-        ?string $body,
-        int $timeout
-    ): array {
-        $context = stream_context_create([
-            'http' => [
-                'method' => $method,
-                'header' => array_map(fn($k, $v) => "$k: $v", array_keys($headers), $headers),
-                'content' => $body ?? '',
-                'timeout' => $timeout / 1000,
-                'ignore_errors' => true,
-            ],
-            'ssl' => [
-                'verify_peer' => !($this->parsedRequest['insecure'] ?? false),
-                'verify_peer_name' => !($this->parsedRequest['insecure'] ?? false),
-            ]
-        ]);
-        
-        $response = @file_get_contents($url, false, $context);
-        
-        $result = [
-            'body' => $response,
-            'headers' => $http_response_header ?? [],
-            'error' => null,
-            'status_code' => 0,
-        ];
-        
-        if ($response === false) {
-            $error = error_get_last();
-            $result['error'] = $error['message'] ?? 'Unknown error';
-        } elseif (!empty($http_response_header)) {
-            preg_match('/HTTP\/\d\.?\d?\s+(\d+)/', $http_response_header[0], $matches);
-            $result['status_code'] = (int)($matches[1] ?? 0);
-        }
-        
-        return $result;
-    }
-    
-    private function runScript(string $script, array &$result): void {
-        $this->info("Running script...");
-        
-        $outputBuffer = [];
-        
-        $responseObj = new class($result) {
-            public string $body;
-            public int $status_code;
-            public array $headers;
-            private ?array $jsonBody = null;
-            
-            public function __construct(array $result) {
-                $this->body = $result['body'] ?? '';
-                $this->status_code = $result['status_code'] ?? 0;
-                $this->headers = $this->parseHeaders($result['headers'] ?? []);
-                $this->jsonBody = null;
-            }
-            
-            private function parseHeaders(array $headers): array {
-                $parsed = [];
-                foreach ($headers as $header) {
-                    if (str_contains($header, ':')) {
-                        [$key, $value] = array_map('trim', explode(':', $header, 2));
-                        $parsed[$key] = $value;
-                    }
-                }
-                return $parsed;
-            }
-            
-            public function json_body(bool $assoc = true): mixed {
-                if ($this->jsonBody === null) {
-                    $this->jsonBody = json_decode($this->body, $assoc);
-                }
-                return $this->jsonBody;
-            }
-        };
-        
-        $apiObj = new class($this, $responseObj) {
-            private HttpTool $tool;
-            private object $response;
-            private ?string $nextRequest = null;
-            
-            public function __construct(HttpTool $tool, object $response) {
-                $this->tool = $tool;
-                $this->response = $response;
-            }
-            
-            public function set(string $key, mixed $value): void {
-                $this->tool->setGlobalVariable($key, (string) $value);
-            }
-            
-            public function get(string $key): ?string {
-                return $this->tool->getGlobalVariable($key);
-            }
-            
-            public function send(string $name): void {
-                $this->nextRequest = $name;
-            }
-            
-            public function getNextRequest(): ?string {
-                return $this->nextRequest;
-            }
-            
-            public function response(): object {
-                return $this->response;
-            }
-        };
-        
-        $outputObj = new class($outputBuffer, $this) {
-            public array $buffer;
-            public bool $suppressResponse = false;
-            private HttpTool $tool;
-            
-            public function __construct(array &$buffer, HttpTool $tool) {
-                $this->buffer = &$buffer;
-                $this->tool = $tool;
-            }
-            
-            public function write(string $text): void {
-                $this->buffer = [];
-                $this->buffer[] = $text;
-                $this->suppressResponse = true;
-                $this->tool->suppressResponse(true);
-            }
-            
-            public function clear(): void {
-                $this->buffer = [];
-            }
-            
-            public function append(string $text): void {
-                $this->buffer[] = $text;
-            }
-        };
-        
-        $this->scriptContext = [
-            'response' => $responseObj,
-            'api' => $apiObj,
-            'output' => $outputObj,
-            'var_dump' => function(mixed $var): void { var_dump($var); },
-            'print_r' => function(mixed $var): void { print_r($var); },
-            'json_decode' => fn(string $json, bool $assoc = true) => json_decode($json, $assoc),
-            'json_encode' => fn(mixed $data, int $flags = 0) => json_encode($data, $flags),
-        ];
-        
-        extract($this->scriptContext);
-        
-        try {
-            eval($script);
-        } catch (Throwable $e) {
-            $this->error("Script error: {$e->getMessage()}");
-        }
-        
-        // Handle output based on what was called and -a flag
-        if ($outputObj->suppressResponse) {
-            // write() was called
-            if ($this->showAll) {
-                // With -a: full response + custom output
-                $this->suppressResponse = false; // Temporarily allow printResponse
-                $this->printResponse($result);
-                $this->suppressResponse = true; // Restore
-                echo "\n=== Script Output ===\n";
-                echo implode("\n", $outputBuffer) . "\n";
-                echo "======================\n\n";
-            } else {
-                // Without -a: only custom text
-                echo implode("\n", $outputBuffer) . "\n";
-            }
-        } elseif (!empty($outputBuffer)) {
-            // append() was called
-            if ($this->showAll) {
-                // With -a: full response + custom output
-                $this->printResponse($result);
-                echo "\n=== Script Output ===\n";
-                echo implode("\n", $outputBuffer) . "\n";
-                echo "======================\n\n";
-            } else {
-                // Without -a: body + custom output
-                echo $result['body'] . "\n";
-                echo implode("\n", $outputBuffer) . "\n";
-            }
-        } else {
-            // No output calls
-            if ($this->showAll) {
-                $this->printResponse($result);
-            } else {
-                echo $result['body'] . "\n";
-            }
-        }
-        
-        $result['body'] = $this->scriptContext['response']->body;
-        
-        $nextRequest = $this->scriptContext['api']->getNextRequest();
-        if ($nextRequest) {
-            $this->info("Executing next request: {$nextRequest}");
-            $this->requestName = $nextRequest;
-            $this->parseAndExecute();
-        }
-    }
-    
-    private function parseHeaders(array $headers): array {
-        $parsed = [];
-        foreach ($headers as $header) {
-            if (str_contains($header, ':')) {
-                [$key, $value] = array_map('trim', explode(':', $header, 2));
-                $parsed[$key] = $value;
-            }
-        }
-        return $parsed;
-    }
-    
-    private function info(string $message): void {
-        if ($this->showAll) {
-            echo "[INFO] {$message}\n";
-        }
-    }
-    
-    private function printRequest(): void {
-        if (!$this->showAll) return;
-        
-        echo "\n=== Request ===\n";
-        echo "{$this->parsedRequest['method']} {$this->parsedRequest['url']}\n";
-        
-        if (!empty($this->parsedRequest['headers'])) {
-            echo "\nHeaders:\n";
-            foreach ($this->parsedRequest['headers'] as $key => $value) {
-                echo "  {$key}: {$value}\n";
-            }
-        }
-        
-        if (!empty($this->parsedRequest['body'])) {
-            echo "\nBody:\n{$this->parsedRequest['body']}\n";
-        }
-        echo "================\n\n";
-    }
-    
-    private function printResponse(array $result): void {
-        if ($this->suppressResponse) {
-            return; // Response suppressed by $output->write()
-        }
-        
-        if ($this->showAll) {
-            echo "\n=== Response ===\n";
-            echo "Status: {$result['status_code']}\n";
-            
-            if (!empty($result['headers'])) {
-                echo "\nHeaders:\n";
-                foreach ($result['headers'] as $header) {
-                    echo "  {$header}\n";
-                }
-            }
-            
-            echo "\nBody:\n";
-        }
-        
-        echo $result['body'] . "\n";
-        
-        if ($this->showAll) {
-            echo "================\n\n";
-        }
-    }
-    
-    private function error(string $message): void {
-        fwrite(STDERR, "[ERROR] {$message}\n");
-        exit(1);
-    }
+class HttpTool
+{
+	private string $file;
+	private ?string $requestName;
+	private bool $showAll = false;
+	private bool $suppressResponse = false;
+	private array $lines = [];
+	private array $globalVariables = [];
+	private array $localVariables = [];
+	private array $parsedRequest = [];
+	private array $scriptContext = [];
+
+	public function getGlobalVariable(string $key): ?string
+	{
+		return $this->globalVariables[$key] ?? null;
+	}
+
+	public function setGlobalVariable(string $key, string $value): void
+	{
+		$this->globalVariables[$key] = $value;
+	}
+
+	public function suppressResponse(bool $value = true): void
+	{
+		$this->suppressResponse = $value;
+	}
+
+	public function __construct(string $file, ?string $requestName = null, bool $showAll = false)
+	{
+		$this->file = $file;
+		$this->requestName = $requestName;
+		$this->showAll = $showAll;
+	}
+
+	public function run(): void
+	{
+		if (!file_exists($this->file)) {
+			$this->error("File not found: {$this->file}");
+		}
+
+		$this->lines = file($this->file, FILE_IGNORE_NEW_LINES);
+
+		if ($this->requestName === null) {
+			$this->requestName = 'main';
+		}
+
+		$this->parseAndExecute();
+	}
+
+	private function parseAndExecute(): void
+	{
+		$this->parsedRequest = []; // Reset for chained requests
+		$this->suppressResponse = false; // Reset for chained requests
+
+		$area = $this->findRequestArea($this->requestName);
+
+		if ($area === null) {
+			$this->error("Request '#{$this->requestName}' not found in {$this->file}");
+		}
+
+		[$start, $end] = $area;
+
+		$this->parseGlobalVariables($start);
+
+		$this->parseRequest($start, $end);
+
+		if (empty($this->parsedRequest['url'])) {
+			$this->error("No URL found for request '#{$this->requestName}'");
+		}
+
+		$this->executeRequest();
+	}
+
+	private function findRequestArea(string $name): ?array
+	{
+		$inArea = false;
+		$areaStart = null;
+		$areaEnd = null;
+		$requestNameFromLine = '';
+
+		foreach ($this->lines as $i => $line) {
+			$trimmed = trim($line);
+
+			if (preg_match('/^###\s*#(.+)$/', $trimmed, $matches)) {
+				$requestNameFromLine = trim($matches[1]);
+				if ($requestNameFromLine === $name) {
+					$inArea = true;
+					$areaStart = $i + 1;
+					continue;
+				} else {
+					if ($inArea) {
+						$areaEnd = $i - 1;
+					}
+					$inArea = false;
+				}
+			}
+
+			if (trim($line) === '###') {
+				if ($inArea) {
+					$areaEnd = $i - 1;
+					break;
+				}
+				continue;
+			}
+
+			if ($inArea && $areaStart === null) {
+				$areaStart = $i;
+			}
+		}
+
+		if ($areaStart !== null && $areaEnd === null) {
+			$areaEnd = count($this->lines) - 1;
+		}
+
+		if ($areaStart !== null) {
+			return [$areaStart, $areaEnd];
+		}
+
+		return null;
+	}
+
+	private function parseGlobalVariables(int $maxLine): void
+	{
+		for ($i = 0; $i < $maxLine; $i++) {
+			$line = trim($this->lines[$i]);
+
+			if ($line === '' || $line === '###' || $line[0] === '#') {
+				continue;
+			}
+
+			if ($line[0] === '@') {
+				$this->parseVariable($line, true);
+			}
+		}
+	}
+
+	private function parseVariable(string $line, bool $isGlobal = false): void
+	{
+		if (preg_match('/^@([a-zA-Z_][\w\-_\.]*)\s*=\s*(.+)$/', $line, $matches)) {
+			$key = $matches[1];
+			$fullValue = $matches[2];
+
+			// Remove inline comment
+			$value = preg_replace('/\s*#.*$/', '', $fullValue);
+			$value = trim($value);
+
+			$value = $this->replaceVariables($value);
+
+			if (str_starts_with($key, 'cfg.')) {
+				$configKey = substr($key, 4);
+				$this->parsedRequest[$configKey] = $this->parseConfigValue($configKey, $value);
+			} else {
+				if ($isGlobal) {
+					$this->globalVariables[$key] = $value;
+				} else {
+					$this->localVariables[$key] = $value;
+				}
+			}
+		}
+	}
+
+	private function parseConfigValue(string $key, string $value): mixed
+	{
+		return match ($key) {
+			'insecure' => $value === 'true',
+			'dry_run' => $value === 'true',
+			'timeout' => (int) $value,
+			'proxy' => $value,
+			'raw' => array_map('trim', explode(',', $value)),
+			'check_json_body' => $value === 'true',
+			default => $value,
+		};
+	}
+
+	private function parseRequest(int $start, int $end): void
+	{
+		$parsingState = 'variables';
+		$bodyLines = [];
+		$scriptLines = [];
+		$inScript = false;
+		$inBody = false;
+
+		for ($i = $start; $i <= $end; $i++) {
+			$line = $this->lines[$i];
+			$trimmed = trim($line);
+
+			if ($trimmed === '' || $trimmed[0] === '#') {
+				continue;
+			}
+
+			if ($parsingState === 'variables') {
+				if (isset($trimmed[0]) && $trimmed[0] === '@') {
+					$this->parseVariable($trimmed, false);
+					continue;
+				}
+			}
+
+			if ($parsingState === 'variables') {
+				$parsingState = 'request';
+			}
+
+			if ($parsingState === 'request') {
+				// Исправленная регулярка: протокол опционален
+				if (preg_match('/^([A-Z]+)\s+((?:https?:\/\/)?[^\s#]+)/i', $trimmed, $matches)) {
+					$this->parsedRequest['method'] = strtoupper($matches[1]);
+					$url = $matches[2];
+					if (preg_match('/HTTP\/[\d.]+$/', $trimmed, $httpMatch)) {
+						$url = str_replace($httpMatch[0], '', $url);
+					}
+					$this->parsedRequest['url'] = $this->replaceVariables(trim($url));
+					$parsingState = 'headers';
+					continue;
+				}
+			}
+
+			if ($parsingState === 'headers' || $parsingState === 'query') {
+				// Stop at next request
+				if ($trimmed !== '' && str_starts_with($trimmed, '###')) {
+					break;
+				}
+
+				if ($trimmed === '--{%' || $trimmed === '> {%' || preg_match('/^>%s*\{%$/', $trimmed)) {
+					$inScript = true;
+					$parsingState = 'script';
+					$scriptLines[] = $line;
+					continue;
+				}
+
+				if (preg_match('/^([^=:\s]+)\s*[:=]\s*(.*)$/', $trimmed, $matches)) {
+					$key = trim($matches[1]);
+					$value = $this->replaceVariables(trim($matches[2]));
+
+					if (str_starts_with($key, '@')) {
+						continue;
+					}
+
+					if (str_contains($trimmed, ':')) {
+						$this->parsedRequest['headers'][$key] = $value;
+					} else {
+						$this->parsedRequest['query'][$key] = $value;
+					}
+					continue;
+				}
+
+				// Not a header/query - it's body
+				$parsingState = 'body';
+			}
+
+			if ($parsingState === 'body') {
+				if ($trimmed !== '' && str_starts_with($trimmed, '###')) {
+					break;
+				}
+				if ($trimmed === '--{%' || $trimmed === '> {%') {
+					break;
+				}
+				if (!empty($trimmed) || !empty($bodyLines)) {
+					$bodyLines[] = $line;
+				}
+				continue;
+			}
+
+			if ($parsingState === 'script' || $inScript) {
+				if ($trimmed === '--pre' || $trimmed === '--post') {
+					// marker
+				}
+
+				if (preg_match('/^%\}$/', $trimmed) || preg_match('/^--%\}$/', $trimmed)) {
+					$inScript = false;
+					$scriptLines[] = $line;
+
+					$scriptContent = implode("\n", array_slice($scriptLines, 1, -1));
+
+					if (preg_match('/^--pre\s*$.*?^--post\s*$/ms', $scriptContent)) {
+						preg_match('/^--pre\s*\n(.*)^--post\s*\n(.*)$/ms', $scriptContent, $matches);
+						$this->parsedRequest['pre_script'] = trim($matches[1] ?? '');
+						$this->parsedRequest['script'] = trim($matches[2] ?? '');
+					} else {
+						$this->parsedRequest['script'] = $scriptContent;
+					}
+					continue;
+				}
+				$scriptLines[] = $line;
+			}
+		}
+
+		if (!empty($bodyLines)) {
+			$this->parsedRequest['body'] = implode("\n", $bodyLines);
+		}
+	}
+
+	private function replaceVariables(string $text): string
+	{
+		return preg_replace_callback('/\{\{(.*?)\}\}/', function ($matches) {
+			$key = trim($matches[1]);
+
+			if ($key === '') {
+				$this->error("Empty variable key");
+				return $matches[0];
+			}
+
+			$firstChar = $key[0];
+
+			if ($firstChar === '$') {
+				$envKey = strtoupper(substr($key, 1));
+				$value = getenv($envKey);
+				return $value !== false ? $value : '';
+			}
+
+			if ($firstChar === '>') {
+				$isCached = str_starts_with($key, '>>');
+				$cmd = substr($key, $isCached ? 2 : 1);
+
+				if ($isCached && isset($this->globalVariables[$key])) {
+					return $this->globalVariables[$key];
+				}
+
+				$output = $this->execCommand($cmd);
+
+				if ($isCached) {
+					$this->globalVariables[$key] = $output;
+				}
+
+				return $output;
+			}
+
+			if (isset($this->localVariables[$key])) {
+				return $this->localVariables[$key];
+			}
+
+			if (isset($this->globalVariables[$key])) {
+				return $this->globalVariables[$key];
+			}
+
+			$this->error("Variable '{$key}' not found");
+			return $matches[0];
+		}, $text);
+	}
+
+	private function execCommand(string $cmd): string
+	{
+		$descriptorSpec = [
+			0 => ['pipe', 'r'],
+			1 => ['pipe', 'w'],
+			2 => ['pipe', 'w']
+		];
+
+		$process = proc_open($cmd, $descriptorSpec, $pipes);
+
+		if (!is_resource($process)) {
+			return "Error: could not execute command";
+		}
+
+		fclose($pipes[0]);
+		$stdout = stream_get_contents($pipes[1]);
+		fclose($pipes[1]);
+		$stderr = stream_get_contents($pipes[2]);
+		fclose($pipes[2]);
+
+		proc_close($process);
+
+		return trim($stdout);
+	}
+
+	private function runPreScript(string $script, string &$url, string &$method, array &$headers, ?string &$body, array &$query): void
+	{
+		$this->info("Running pre-script...");
+
+		$requestData = [
+			'url' => $url,
+			'method' => $method,
+			'headers' => $headers,
+			'body' => $body,
+			'query' => $query,
+		];
+
+		$apiObj = new class($this) {
+			private HttpTool $tool;
+
+			public function __construct(HttpTool $tool)
+			{
+				$this->tool = $tool;
+			}
+
+			public function set(string $key, mixed $value): void
+			{
+				$this->tool->setGlobalVariable($key, (string) $value);
+			}
+
+			public function get(string $key): ?string
+			{
+				return $this->tool->getGlobalVariable($key);
+			}
+		};
+
+		$requestObj = new class($requestData) {
+			public string $url;
+			public string $method;
+			public array $headers;
+			public ?string $body;
+			public array $query;
+
+			public function __construct(array $data)
+			{
+				foreach ($data as $k => $v) {
+					$this->$k = $v;
+				}
+			}
+		};
+
+		$this->scriptContext = [
+			'api' => $apiObj,
+			'var_dump' => function (mixed $var): void {
+				var_dump($var);
+			},
+			'print_r' => function (mixed $var): void {
+				print_r($var);
+			},
+			'json_decode' => fn(string $json, bool $assoc = true) => json_decode($json, $assoc),
+			'json_encode' => fn(mixed $data, int $flags = 0) => json_encode($data, $flags),
+		];
+
+		// Add request as separate variable (extract doesn't work with objects)
+		$request = $requestObj;
+
+		extract($this->scriptContext);
+
+		try {
+			eval($script);
+		} catch (Throwable $e) {
+			$this->error("Pre-script error: {$e->getMessage()}");
+		}
+
+		// Apply modifications from $request
+		$url = $request->url;
+		$method = $request->method;
+		$headers = array_merge($headers, $request->headers);
+		if ($request->body !== null) $body = $request->body;
+		$query = array_merge($query, $request->query);
+	}
+
+	private function executeRequest(): void
+	{
+		$url = $this->parsedRequest['url'];
+		$method = $this->parsedRequest['method'] ?? 'GET';
+		$headers = $this->parsedRequest['headers'] ?? [];
+		$body = $this->parsedRequest['body'] ?? null;
+		$query = $this->parsedRequest['query'] ?? [];
+		$timeout = ($this->parsedRequest['timeout'] ?? 30) * 1000;
+
+		if (!empty($this->parsedRequest['pre_script'])) {
+			$this->runPreScript($this->parsedRequest['pre_script'], $url, $method, $headers, $body, $query);
+		}
+
+		if (!empty($query)) {
+			$url .= '?' . http_build_query($query);
+		}
+
+		$this->info("Executing: {$method} {$url}");
+
+		if (!empty($this->parsedRequest['dry_run'])) {
+			$this->info("Dry run mode - request not sent");
+			$this->printRequest();
+			return;
+		}
+
+		$result = $this->makeHttpRequest($url, $method, $headers, $body, $timeout);
+
+		if ($result['error']) {
+			$this->error("Request failed: {$result['error']}");
+		}
+
+		// If there's a script with write(), suppress the default body output
+		if (!empty($this->parsedRequest['script'])) {
+			$this->runScript($this->parsedRequest['script'], $result);
+		} else {
+			$this->printResponse($result);
+		}
+	}
+
+	private function makeHttpRequest(
+		string $url,
+		string $method,
+		array $headers,
+		?string $body,
+		int $timeout
+	): array {
+		$context = stream_context_create([
+			'http' => [
+				'method' => $method,
+				'header' => array_map(fn($k, $v) => "$k: $v", array_keys($headers), $headers),
+				'content' => $body ?? '',
+				'timeout' => $timeout / 1000,
+				'ignore_errors' => true,
+			],
+			'ssl' => [
+				'verify_peer' => !($this->parsedRequest['insecure'] ?? false),
+				'verify_peer_name' => !($this->parsedRequest['insecure'] ?? false),
+			]
+		]);
+
+		$response = @file_get_contents($url, false, $context);
+
+		$result = [
+			'body' => $response,
+			'headers' => $http_response_header ?? [],
+			'error' => null,
+			'status_code' => 0,
+		];
+
+		if ($response === false) {
+			$error = error_get_last();
+			$result['error'] = $error['message'] ?? 'Unknown error';
+		} elseif (!empty($http_response_header)) {
+			preg_match('/HTTP\/\d\.?\d?\s+(\d+)/', $http_response_header[0], $matches);
+			$result['status_code'] = (int)($matches[1] ?? 0);
+		}
+
+		return $result;
+	}
+
+	private function runScript(string $script, array &$result): void
+	{
+		$this->info("Running script...");
+
+		$outputBuffer = [];
+
+		$responseObj = new class($result) {
+			public string $body;
+			public int $status_code;
+			public array $headers;
+			private ?array $jsonBody = null;
+
+			public function __construct(array $result)
+			{
+				$this->body = $result['body'] ?? '';
+				$this->status_code = $result['status_code'] ?? 0;
+				$this->headers = $this->parseHeaders($result['headers'] ?? []);
+				$this->jsonBody = null;
+			}
+
+			private function parseHeaders(array $headers): array
+			{
+				$parsed = [];
+				foreach ($headers as $header) {
+					if (str_contains($header, ':')) {
+						[$key, $value] = array_map('trim', explode(':', $header, 2));
+						$parsed[$key] = $value;
+					}
+				}
+				return $parsed;
+			}
+
+			public function json_body(bool $assoc = true): mixed
+			{
+				if ($this->jsonBody === null) {
+					$this->jsonBody = json_decode($this->body, $assoc);
+				}
+				return $this->jsonBody;
+			}
+		};
+
+		$apiObj = new class($this, $responseObj) {
+			private HttpTool $tool;
+			private object $response;
+			private ?string $nextRequest = null;
+
+			public function __construct(HttpTool $tool, object $response)
+			{
+				$this->tool = $tool;
+				$this->response = $response;
+			}
+
+			public function set(string $key, mixed $value): void
+			{
+				$this->tool->setGlobalVariable($key, (string) $value);
+			}
+
+			public function get(string $key): ?string
+			{
+				return $this->tool->getGlobalVariable($key);
+			}
+
+			public function send(string $name): void
+			{
+				$this->nextRequest = $name;
+			}
+
+			public function getNextRequest(): ?string
+			{
+				return $this->nextRequest;
+			}
+
+			public function response(): object
+			{
+				return $this->response;
+			}
+		};
+
+		$outputObj = new class($outputBuffer, $this) {
+			public array $buffer;
+			public bool $suppressResponse = false;
+			private HttpTool $tool;
+
+			public function __construct(array &$buffer, HttpTool $tool)
+			{
+				$this->buffer = &$buffer;
+				$this->tool = $tool;
+			}
+
+			public function write(string $text): void
+			{
+				$this->buffer = [];
+				$this->buffer[] = $text;
+				$this->suppressResponse = true;
+				$this->tool->suppressResponse(true);
+			}
+
+			public function clear(): void
+			{
+				$this->buffer = [];
+			}
+
+			public function append(string $text): void
+			{
+				$this->buffer[] = $text;
+			}
+		};
+
+		$this->scriptContext = [
+			'response' => $responseObj,
+			'api' => $apiObj,
+			'output' => $outputObj,
+			'var_dump' => function (mixed $var): void {
+				var_dump($var);
+			},
+			'print_r' => function (mixed $var): void {
+				print_r($var);
+			},
+			'json_decode' => fn(string $json, bool $assoc = true) => json_decode($json, $assoc),
+			'json_encode' => fn(mixed $data, int $flags = 0) => json_encode($data, $flags),
+		];
+
+		extract($this->scriptContext);
+
+		try {
+			eval($script);
+		} catch (Throwable $e) {
+			$this->error("Script error: {$e->getMessage()}");
+		}
+
+		// Handle output based on what was called and -a flag
+		if ($outputObj->suppressResponse) {
+			// write() was called
+			if ($this->showAll) {
+				// With -a: full response + custom output
+				$this->suppressResponse = false; // Temporarily allow printResponse
+				$this->printResponse($result);
+				$this->suppressResponse = true; // Restore
+				echo "\n=== Script Output ===\n";
+				echo implode("\n", $outputBuffer) . "\n";
+				echo "======================\n\n";
+			} else {
+				// Without -a: only custom text
+				echo implode("\n", $outputBuffer) . "\n";
+			}
+		} elseif (!empty($outputBuffer)) {
+			// append() was called
+			if ($this->showAll) {
+				// With -a: full response + custom output
+				$this->printResponse($result);
+				echo "\n=== Script Output ===\n";
+				echo implode("\n", $outputBuffer) . "\n";
+				echo "======================\n\n";
+			} else {
+				// Without -a: body + custom output
+				echo $result['body'] . "\n";
+				echo implode("\n", $outputBuffer) . "\n";
+			}
+		} else {
+			// No output calls
+			if ($this->showAll) {
+				$this->printResponse($result);
+			} else {
+				echo $result['body'] . "\n";
+			}
+		}
+
+		$result['body'] = $this->scriptContext['response']->body;
+
+		$nextRequest = $this->scriptContext['api']->getNextRequest();
+		if ($nextRequest) {
+			$this->info("Executing next request: {$nextRequest}");
+			$this->requestName = $nextRequest;
+			$this->parseAndExecute();
+		}
+	}
+
+	private function parseHeaders(array $headers): array
+	{
+		$parsed = [];
+		foreach ($headers as $header) {
+			if (str_contains($header, ':')) {
+				[$key, $value] = array_map('trim', explode(':', $header, 2));
+				$parsed[$key] = $value;
+			}
+		}
+		return $parsed;
+	}
+
+	private function info(string $message): void
+	{
+		if ($this->showAll) {
+			echo "[INFO] {$message}\n";
+		}
+	}
+
+	private function printRequest(): void
+	{
+		if (!$this->showAll) return;
+
+		echo "\n=== Request ===\n";
+		echo "{$this->parsedRequest['method']} {$this->parsedRequest['url']}\n";
+
+		if (!empty($this->parsedRequest['headers'])) {
+			echo "\nHeaders:\n";
+			foreach ($this->parsedRequest['headers'] as $key => $value) {
+				echo "  {$key}: {$value}\n";
+			}
+		}
+
+		if (!empty($this->parsedRequest['body'])) {
+			echo "\nBody:\n{$this->parsedRequest['body']}\n";
+		}
+		echo "================\n\n";
+	}
+
+	private function printResponse(array $result): void
+	{
+		if ($this->suppressResponse) {
+			return; // Response suppressed by $output->write()
+		}
+
+		if ($this->showAll) {
+			echo "\n=== Response ===\n";
+			echo "Status: {$result['status_code']}\n";
+
+			if (!empty($result['headers'])) {
+				echo "\nHeaders:\n";
+				foreach ($result['headers'] as $header) {
+					echo "  {$header}\n";
+				}
+			}
+
+			echo "\nBody:\n";
+		}
+
+		echo $result['body'] . "\n";
+
+		if ($this->showAll) {
+			echo "================\n\n";
+		}
+	}
+
+	private function error(string $message): void
+	{
+		fwrite(STDERR, "[ERROR] {$message}\n");
+		exit(1);
+	}
 }
 
 $args = $argv;
 
 if (count($args) < 2) {
-    echo "Usage: ht [-a|--all] <file.ht> [requestName]\n";
-    echo "  -a, --all    Show all information (headers, status, etc.)\n";
-    echo "  If requestName is not provided, defaults to 'main'\n";
-    exit(1);
+	echo "Usage: ht [-a|--all] <file.ht> [requestName]\n";
+	echo "  -a, --all    Show all information (headers, status, etc.)\n";
+	echo "  If requestName is not provided, defaults to 'main'\n";
+	exit(1);
 }
 
 $showAll = false;
@@ -737,18 +785,18 @@ $file = null;
 $requestName = null;
 
 for ($i = 1; $i < count($args); $i++) {
-    if ($args[$i] === '-a' || $args[$i] === '--all') {
-        $showAll = true;
-    } elseif ($args[$i][0] !== '-' && $file === null) {
-        $file = $args[$i];
-    } elseif ($args[$i][0] !== '-' && $file !== null && $requestName === null) {
-        $requestName = $args[$i];
-    }
+	if ($args[$i] === '-a' || $args[$i] === '--all') {
+		$showAll = true;
+	} elseif ($args[$i][0] !== '-' && $file === null) {
+		$file = $args[$i];
+	} elseif ($args[$i][0] !== '-' && $file !== null && $requestName === null) {
+		$requestName = $args[$i];
+	}
 }
 
 if ($file === null) {
-    echo "Error: file.ht required\n";
-    exit(1);
+	echo "Error: file.ht required\n";
+	exit(1);
 }
 
 $tool = new HttpTool($file, $requestName, $showAll);
