@@ -1,0 +1,17 @@
+{
+    "name": "lumetas/ht",
+    "description": "HTTP tool for executing requests from .ht files",
+    "type": "project",
+    "license": "MIT",
+    "bin": [
+        "bin/ht"
+    ],
+    "require": {
+        "php": ">=8.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Lum\\Ht\\": "src/"
+        }
+    }
+}
