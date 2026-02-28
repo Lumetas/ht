@@ -210,6 +210,9 @@ class SwaggerGenerator
 
         $url = $this->substitutePathParams($url, $pathParams);
 
+        $responses = $details['responses'] ?? [];
+        $script = $this->generateStatusScript($responses);
+
         $this->requests[] = [
             'name' => $operationId,
             'method' => strtoupper($method),
@@ -218,7 +221,44 @@ class SwaggerGenerator
             'query' => $queryParams,
             'body' => $body,
             'summary' => $details['summary'] ?? '',
+            'script' => $script,
         ];
+    }
+
+    private function generateStatusScript(array $responses): ?string
+    {
+        $statusMessages = [];
+        
+        foreach ($responses as $code => $details) {
+            if (!is_numeric($code) && !preg_match('/^\d{3}$/', $code)) {
+                continue;
+            }
+            
+            $description = $details['description'] ?? "Status {$code}";
+            $statusMessages[$code] = $description;
+        }
+
+        if (empty($statusMessages)) {
+            return null;
+        }
+
+        $statusArray = var_export($statusMessages, true);
+        
+        $script = <<<PHP
+> {%
+\$statusMessages = {$statusArray};
+
+if (isset(\$statusMessages[\$response->status_code])) {
+    \$output->append(\$statusMessages[\$response->status_code]);
+} elseif (\$response->status_code >= 500) {
+    \$output->append('Internal server error: ' . \$response->status_code);
+} elseif (\$response->status_code >= 400) {
+    \$output->append('Client error: ' . \$response->status_code);
+}
+%}
+PHP;
+
+        return $script;
     }
 
     private function substitutePathParams(string $url, array $params): string
@@ -333,6 +373,11 @@ class SwaggerGenerator
                 $lines[] = 'Content-Type: application/json';
                 $lines[] = '';
                 $lines[] = $request['body'];
+            }
+
+            if ($request['script']) {
+                $lines[] = '';
+                $lines[] = $request['script'];
             }
 
             $lines[] = '';
