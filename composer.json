@@ -1,7 +1,7 @@
 {
     "name": "lumetas/ht",
     "description": "HTTP tool for executing requests from .ht files",
-    "type": "project",
+    "type": "library",
     "license": "MIT",
     "bin": [
         "bin/ht"
