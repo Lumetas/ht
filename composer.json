@@ -16,7 +16,7 @@
             "HT\\": "src/"
         },
 		"files": [
-			"src/functions.php"
+			"src/stubs.php"
 		]
     }
 }
