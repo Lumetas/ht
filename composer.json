@@ -14,9 +14,6 @@
     "autoload": {
         "psr-4": {
             "Lum\\Ht\\": "src/"
-        },
-		"files": [
-			"src/stubs.php"
-		]
+        }
     }
 }
