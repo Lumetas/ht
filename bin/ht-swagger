@@ -4,7 +4,7 @@
 if (file_exists(__DIR__ . '/../../../../vendor/autoload.php')) {
     require_once __DIR__ . '/../../../../vendor/autoload.php';
 }
-use Lum\Ht\SwaggerGenerator;
+use HT\SwaggerGenerator;
 
 if (count($argv) < 3) {
     echo "Usage: ht-swagger <openapi.yml> <output.ht>\n";

@@ -13,7 +13,10 @@
     },
     "autoload": {
         "psr-4": {
-            "Lum\\Ht\\": "src/"
-        }
+            "HT\\": "src/"
+        },
+		"files": [
+			"src/functions.php"
+		]
     }
 }
