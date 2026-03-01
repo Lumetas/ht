@@ -23,10 +23,40 @@ class HttpTool
 		$this->globalVariables[$key] = $value;
 	}
 
+	public function getLocalVariable(string $key): ?string
+	{
+		return $this->localVariables[$key] ?? null;
+	}
+
 	public function suppressResponse(bool $value = true): void
 	{
 		$this->suppressResponse = $value;
 	}
+
+	public function chainToRequest(string $name): void
+	{
+		$this->requestName = $name;
+		$this->parsedRequest = [];
+		$this->suppressResponse = false;
+
+		$area = $this->findRequestArea($name);
+		if ($area === null) {
+			$this->error("Request '#{$name}' not found in {$this->file}");
+		}
+
+		[$start, $end] = $area;
+		$this->parseRequest($start, $end);
+
+		if (empty($this->parsedRequest['url'])) {
+			if (!empty($this->parsedRequest['script'])) {
+				$result = ['body' => '', 'headers' => [], 'status_code' => 0];
+				$this->runScript($this->parsedRequest['script'], $result);
+			}
+		} else {
+			$this->executeRequest();
+		}
+	}
+
 
 	public function __construct(string $file, ?string $requestName = null, bool $showAll = false)
 	{
@@ -68,10 +98,14 @@ class HttpTool
 		$this->parseRequest($start, $end);
 
 		if (empty($this->parsedRequest['url'])) {
-			$this->error("No URL found for request '#{$this->requestName}'");
+			$this->info("No URL found for request '#{$this->requestName}', running script only");
+			if (!empty($this->parsedRequest['script'])) {
+				$result = ['body' => '', 'headers' => [], 'status_code' => 0];
+				$this->runScript($this->parsedRequest['script'], $result);
+			}
+		} else {
+			$this->executeRequest();
 		}
-
-		$this->executeRequest();
 	}
 
 	private function findRequestArea(string $name): ?array
@@ -153,11 +187,13 @@ class HttpTool
 				$configKey = substr($key, 4);
 				$this->parsedRequest[$configKey] = $this->parseConfigValue($configKey, $value);
 			} else {
-				if ($isGlobal) {
+		if ($isGlobal) {
+				if (!isset($this->globalVariables[$key])) {
 					$this->globalVariables[$key] = $value;
-				} else {
-					$this->localVariables[$key] = $value;
 				}
+			} else {
+				$this->localVariables[$key] = $value;
+			}
 			}
 		}
 	}
@@ -210,8 +246,16 @@ class HttpTool
 					if (preg_match('/HTTP\/[\d.]+$/', $trimmed, $httpMatch)) {
 						$url = str_replace($httpMatch[0], '', $url);
 					}
-					$this->parsedRequest['url'] = $this->replaceVariables(trim($url));
+					$this->parsedRequest['url'] = trim($url);
 					$parsingState = 'headers';
+					continue;
+				}
+				
+				// No URL found, check if it's a script
+				if ($trimmed === '<?php' || $trimmed === '<?' || preg_match('/^<\?php.*$/', $trimmed)) {
+					$inScript = true;
+					$parsingState = 'script';
+					$scriptLines[] = $line;
 					continue;
 				}
 			}
@@ -231,7 +275,7 @@ class HttpTool
 
 				if (preg_match('/^([^=:\s]+)\s*[:=]\s*(.*)$/', $trimmed, $matches)) {
 					$key = trim($matches[1]);
-					$value = $this->replaceVariables(trim($matches[2]));
+					$value = trim($matches[2]);
 
 					if (str_starts_with($key, '@')) {
 						continue;
@@ -370,6 +414,7 @@ class HttpTool
 	{
 		$this->info("Running pre-script...");
 
+		ob_start();
 		$requestData = [
 			'url' => $url,
 			'method' => $method,
@@ -380,6 +425,7 @@ class HttpTool
 
 		$apiObj = new class($this) {
 			private HttpTool $tool;
+			private ?string $nextRequest = null;
 
 			public function __construct(HttpTool $tool)
 			{
@@ -393,7 +439,25 @@ class HttpTool
 
 			public function get(string $key): ?string
 			{
-				return $this->tool->getGlobalVariable($key);
+				$value = $this->tool->getGlobalVariable($key);
+				if ($value !== null) {
+					return $value;
+				}
+				return $this->tool->getLocalVariable($key);
+			}
+
+			public function send(string $name): void
+			{
+				$this->nextRequest = $name;
+				$this->tool->chainToRequest($name);
+				$this->nextRequest = null;
+			}
+
+			public function getNextRequest(): ?string
+			{
+				$req = $this->nextRequest;
+				$this->nextRequest = null;
+				return $req;
 			}
 		};
 
@@ -412,6 +476,7 @@ class HttpTool
 			}
 		};
 
+		$existingApi = $this->scriptContext['api'] ?? null;
 		$this->scriptContext = [
 			'api' => $apiObj,
 			'var_dump' => function (mixed $var): void {
@@ -422,6 +487,7 @@ class HttpTool
 			},
 			'json_decode' => fn(string $json, bool $assoc = true) => json_decode($json, $assoc),
 			'json_encode' => fn(mixed $data, int $flags = 0) => json_encode($data, $flags),
+			'_parentApi' => $existingApi,
 		];
 
 		// Add request as separate variable (extract doesn't work with objects)
@@ -432,8 +498,11 @@ class HttpTool
 		try {
 			eval($script);
 		} catch (Throwable $e) {
+			ob_end_clean();
 			$this->error("Pre-script error: {$e->getMessage()}");
 		}
+
+		ob_end_clean();
 
 		// Apply modifications from $request
 		$url = $request->url;
@@ -454,6 +523,9 @@ class HttpTool
 
 		if (!empty($this->parsedRequest['pre_script'])) {
 			$this->runPreScript($this->parsedRequest['pre_script'], $url, $method, $headers, $body, $query);
+			foreach ($this->globalVariables as $key => $value) {
+				$this->localVariables[$key] = $value;
+			}
 		}
 
 		$url = $this->replaceVariables($url);
@@ -463,6 +535,7 @@ class HttpTool
 		$headers = array_map(fn($v) => $this->replaceVariables($v), $headers);
 
 		if (!empty($query)) {
+			$query = array_map(fn($v) => $this->replaceVariables($v), $query);
 			$url .= '?' . http_build_query($query);
 		}
 
@@ -588,17 +661,25 @@ class HttpTool
 
 			public function get(string $key): ?string
 			{
-				return $this->tool->getGlobalVariable($key);
+				$value = $this->tool->getGlobalVariable($key);
+				if ($value !== null) {
+					return $value;
+				}
+				return $this->tool->getLocalVariable($key);
 			}
 
 			public function send(string $name): void
 			{
 				$this->nextRequest = $name;
+				$this->tool->chainToRequest($name);
+				$this->nextRequest = null;
 			}
 
 			public function getNextRequest(): ?string
 			{
-				return $this->nextRequest;
+				$req = $this->nextRequest;
+				$this->nextRequest = null;
+				return $req;
 			}
 
 			public function response(): object
@@ -696,10 +777,11 @@ class HttpTool
 			}
 		}
 
-		$result['body'] = $this->scriptContext['response']->body;
+		if (isset($this->scriptContext['response'])) {
+			$result['body'] = $this->scriptContext['response']->body;
+		}
 
-		$nextRequest = $this->scriptContext['api']->getNextRequest();
-		if ($nextRequest) {
+		while (($nextRequest = $this->scriptContext['api']->getNextRequest()) !== null) {
 			$this->info("Executing next request: {$nextRequest}");
 			$this->requestName = $nextRequest;
 			$this->parseAndExecute();

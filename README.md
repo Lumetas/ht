@@ -15,6 +15,8 @@ A command-line HTTP client for testing APIs, written in PHP. Inspired by [ht.nvi
 - JSON body support
 - Headers and query parameters
 - Configurable timeout, insecure SSL, proxy
+- Script-only requests (requests without URL)
+- Immediate request chaining in loops
 
 ## Installation
 
@@ -54,7 +56,7 @@ Headers:
 
 Body:
 {"key":"value"}
-================
+===============
 
 === Response ===
 Status: 200
@@ -65,7 +67,7 @@ Headers:
 
 Body:
 {"success":true,"data":{"id":1}}
-================
+===============
 ```
 
 ## File Format
@@ -106,7 +108,7 @@ GET {{baseUrl}}/users
 Authorization: Bearer {{apiKey}}
 ```
 
-**Local variables** (available only in current request):
+**Local variables** (available only in current request, override global):
 
 ```http
 ### #getUser
@@ -208,11 +210,47 @@ $request->method = 'POST';
 $request->url = 'https://api.example.com/create';
 $request->headers['X-Custom'] = 'value';
 $request->body = '{"modified": true}';
+$request->query['page'] = '1';
 $api->set('some_var', 'value');
 #post
 // This runs after response
 $output->append('Request completed');
 ?>
+```
+
+### Pre-Script modifying query parameters
+
+Variables set in pre-script are available for URL and query replacement:
+
+```http
+### #main
+GET https://api.example.com/search
+name=test
+
+<?php
+#pre
+$api->set('name', 'modified');
+$request->query['page'] = 1;
+?>
+```
+
+### Script-only requests (no URL)
+
+You can create requests without URLs that only run scripts:
+
+```http
+### #main
+
+<?php
+$api->set('counter', 0);
+while($api->get('counter') < 10) {
+    $api->send('loop');
+    $api->set('counter', (int)$api->get('counter') + 1);
+}
+?>
+
+### #loop
+GET https://api.example.com/data?count={{counter}}
 ```
 
 ### Script API
@@ -226,13 +264,23 @@ $output->append('Request completed');
 | `$response->headers` | Headers as associative array |
 | `$response->json_body()` | Parse JSON body (cached) |
 
+**$request** (pre-script only):
+
+| Property/Method | Description |
+|----------------|-------------|
+| `$request->url` | Request URL |
+| `$request->method` | Request method (GET, POST, etc.) |
+| `$request->headers` | Headers as associative array |
+| `$request->body` | Request body |
+| `$request->query` | Query parameters as associative array |
+
 **$api**:
 
 | Method | Description |
 |--------|-------------|
 | `$api->set(key, value)` | Set global variable |
-| `$api->get(key)` | Get global variable |
-| `$api->send(name)` | Execute another request |
+| `$api->get(key)` | Get variable (global or local) |
+| `$api->send(name)` | Execute another request immediately |
 
 **$output**:
 
@@ -267,6 +315,26 @@ $api->send('second');
 
 ### #second
 GET https://api.example.com/step2/{{id}}
+```
+
+### Immediate chaining in loops
+
+The `$api->send()` method executes requests immediately, enabling loops:
+
+```http
+### #main
+
+<?php
+$i = 0;
+while($i < 10) {
+    $api->set('i', $i);
+    $api->send('loop');
+    $i++;
+}
+?>
+
+### #loop
+GET https://api.example.com/count?value={{i}}
 ```
 
 ## Examples
@@ -333,6 +401,21 @@ GET https://api.example.com/data
 <?php
 // Add info after response
 $output->append('Cached: yes');
+?>
+```
+
+### Pre-script with query modification
+
+```http
+### #main
+GET https://api.example.com/search
+name=test
+
+<?php
+#pre
+$request->query['page'] = 1;
+$request->query['limit'] = 10;
+$api->set('name', 'modified');
 ?>
 ```
 
